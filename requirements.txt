@@ -5,8 +5,6 @@ plotly
 scikit-learn==1.6.1 # <-- IMPORTANT: Use the same version as your Part B notebook!
 joblib
 
-# Add hdbscan-learn ONLY if you successfully tuned and saved HDBSCAN results
-hdbscan-learn
 
 # Add matplotlib or seaborn if your saved PLOTTING functions rely on them (unlikely if using plotly in app.py)
 matplotlib
