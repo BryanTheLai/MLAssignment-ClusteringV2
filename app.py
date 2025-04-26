@@ -103,7 +103,148 @@ def get_available_models_and_labels(data_dir: str) -> Dict[str, Optional[ndarray
         st.error(f"Error reading data directory {data_dir}: {e}")
     return model_labels
 
+def generate_cluster_explanations(
+    cluster_means: DataFrame,
+    cluster_means_norm: DataFrame,
+    top_countries_data: Dict[int, Dict[str, int]],
+    feature_list: List[str]
+) -> Dict[int, str]:
+    """
+    Generates textual explanations for each cluster based on its profile.
+
+    Args:
+        cluster_means: DataFrame of mean values per cluster (original scale).
+        cluster_means_norm: DataFrame of normalized mean values per cluster (0-1 scale).
+        top_countries_data: Dict where keys are cluster IDs and values are dicts
+                             of {Country: Count} for top countries.
+        feature_list: List of features used in the profile (columns of the means DFs).
+
+    Returns:
+        A dictionary where keys are cluster IDs and values are explanation strings.
+    """
+    explanations = {}
+    num_clusters = len(cluster_means)
+    num_features = len(feature_list)
+
+    # Define thresholds for 'high' and 'low' based on normalized scale
+    high_threshold = 0.70 # Top 30%
+    low_threshold = 0.30  # Bottom 30%
+
+    for cluster_id in cluster_means.index:
+        desc = f"**Cluster {cluster_id}:**\n"
+        high_features = []
+        low_features = []
+        norm_profile = cluster_means_norm.loc[cluster_id]
+        orig_profile = cluster_means.loc[cluster_id]
+
+        for feature in feature_list:
+            norm_val = norm_profile[feature]
+            if norm_val >= high_threshold:
+                high_features.append((feature, orig_profile[feature]))
+            elif norm_val <= low_threshold:
+                low_features.append((feature, orig_profile[feature]))
+
+        # Sort features by normalized value for potentially better descriptions
+        high_features.sort(key=lambda item: cluster_means_norm.loc[cluster_id, item[0]], reverse=True)
+        low_features.sort(key=lambda item: cluster_means_norm.loc[cluster_id, item[0]])
+
+        if high_features:
+            desc += f"*   Primarily characterized by **high** values in: "
+            desc += ", ".join([f"{f} ({v:.2f})" for f, v in high_features[:3]]) # Show top 3 high
+            if len(high_features) > 3: desc += " and others."
+            desc += ".\n"
+        else:
+             desc += "*   Does not exhibit distinctly high values in the key features compared to other clusters.\n"
+
+
+        if low_features:
+            desc += f"*   Also shows relatively **low** values in: "
+            desc += ", ".join([f"{f} ({v:.2f})" for f, v in low_features[:3]]) # Show top 3 low
+            if len(low_features) > 3: desc += " and others."
+            desc += ".\n"
+        else:
+             desc += "*   Does not exhibit distinctly low values in the key features compared to other clusters.\n"
+
+        # Add country information
+        if cluster_id in top_countries_data and top_countries_data[cluster_id]:
+            top_countries_str = ", ".join([f"{country} ({count})" for country, count in top_countries_data[cluster_id].items()])
+            desc += f"*   Predominantly includes records from: **{top_countries_str}**.\n"
+        else:
+            desc += "*   Country distribution information not available or cluster has few records.\n"
+
+        explanations[cluster_id] = desc
+
+    return explanations
+
 # --- Plotting Functions ---
+def plot_country_distribution_per_cluster(df_profiled_data: DataFrame, cluster_col: str, top_n: int = 3) -> Optional[plt.Figure]:
+    """
+    Generates faceted bar plots showing the top N countries for each cluster.
+
+    Args:
+        df_profiled_data: DataFrame containing original data merged with cluster labels.
+                          Must include 'Country' column and the specified cluster_col.
+        cluster_col: The name of the column containing the cluster labels.
+        top_n: The number of top countries to display for each cluster.
+
+    Returns:
+        A Matplotlib Figure object containing the plots, or None if plotting fails.
+    """
+    if 'Country' not in df_profiled_data.columns:
+        st.warning("Cannot plot country distribution: 'Country' column not found.")
+        return None
+    if cluster_col not in df_profiled_data.columns:
+        st.warning(f"Cannot plot country distribution: Cluster column '{cluster_col}' not found.")
+        return None
+
+    # Exclude noise points (-1) and get unique cluster IDs
+    cluster_ids = sorted([cid for cid in df_profiled_data[cluster_col].unique() if cid != -1 and not pd.isna(cid)])
+
+    if not cluster_ids:
+        st.info("No non-noise clusters found to plot country distribution.")
+        return None
+
+    # Determine grid size for subplots
+    n_clusters = len(cluster_ids)
+    n_cols = 2 # Adjust number of columns for layout if needed
+    n_rows = (n_clusters + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 4), squeeze=False) # Ensure axes is always 2D array
+    axes_flat = axes.flatten() # Flatten for easy iteration
+
+    all_top_countries_data = {} # To store data for explanations
+
+    for i, cluster_id in enumerate(cluster_ids):
+        ax = axes_flat[i]
+        cluster_data = df_profiled_data[df_profiled_data[cluster_col] == cluster_id]
+
+        if cluster_data.empty:
+            ax.set_title(f"Cluster {cluster_id} (No Data)")
+            ax.text(0.5, 0.5, 'No data points in cluster', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+            continue
+
+        country_counts = cluster_data['Country'].value_counts().nlargest(top_n)
+
+        if country_counts.empty:
+            ax.set_title(f"Cluster {cluster_id} (No Country Data)")
+            ax.text(0.5, 0.5, 'No country data for cluster', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+            continue
+
+        # Store for explanations
+        all_top_countries_data[cluster_id] = country_counts.to_dict()
+
+        # Create bar plot
+        sns.barplot(x=country_counts.index, y=country_counts.values, ax=ax, palette="viridis")
+        ax.set_title(f"Cluster {cluster_id} - Top {top_n} Countries")
+        ax.set_ylabel("Number of Records")
+        ax.set_xlabel("Country")
+        ax.tick_params(axis='x', rotation=45)
+
+    # Hide any unused subplots
+    for j in range(i + 1, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    plt.tight_layout(pad=2.0)
+    return fig, all_top_countries_data # Return figure and the data dictionary
 
 def plot_pca_clusters(X_pca: ndarray, labels: ndarray, pca_obj: PCA, model_name: str) -> None:
     """Generates a 2D scatter plot of PCA results colored by cluster labels."""
@@ -363,8 +504,9 @@ elif page == "Cluster Visualization":
 
 
 elif page == "Cluster Profiling":
-    st.title("Cluster Profiling (Radar Chart)")
-    st.markdown("Comparing the average characteristics of each cluster across key features.")
+    st.title("Cluster Profiling Analysis")
+    st.markdown("Comparing the average characteristics of each cluster across key features, "
+                "visualizing country distribution, and providing interpretations.")
 
     if df_original_processed is None:
          st.warning(f"Original processed dataset (`{ORIGINAL_DATA_PATH}`) could not be loaded. Cannot generate profiles.")
@@ -386,12 +528,33 @@ elif page == "Cluster Profiling":
 
                     if len(labels) == len(df_profiling_data):
                         df_profiling_data[temp_cluster_col] = labels
-                        st.info(f"Assigned {len(labels)} labels to {len(df_profiling_data)} rows based on matching length.")
-                    else:
-                        st.error(f"Length mismatch error: Original data has {len(df_profiling_data)} rows, but labels for {selected_model_profile} have {len(labels)} elements. Cannot assign clusters for profiling.")
-                        df_profiling_data = None
+                        # Ensure labels are numeric, coercing errors to NaN
+                        df_profiling_data[temp_cluster_col] = pd.to_numeric(df_profiling_data[temp_cluster_col], errors='coerce')
+                        # Drop rows where cluster label assignment failed or was originally noise/invalid
+                        df_profiling_data = df_profiling_data.dropna(subset=[temp_cluster_col])
+                        # Convert labels to integer type after cleaning
+                        df_profiling_data[temp_cluster_col] = df_profiling_data[temp_cluster_col].astype(int)
 
-                    if df_profiling_data is not None and temp_cluster_col in df_profiling_data.columns:
+                        st.info(f"Assigned valid cluster labels to {len(df_profiling_data)} rows from {selected_model_profile}.")
+                    else:
+                        st.error(f"Length mismatch error: Original data has {len(df_original_processed)} rows, but labels for {selected_model_profile} have {len(labels)} elements. Cannot assign clusters for profiling.")
+                        df_profiling_data = None # Prevent further processing
+
+                    # --- Start Profiling if Data is Ready ---
+                    if df_profiling_data is not None and not df_profiling_data.empty:
+
+                        # --- 1. Country Distribution ---
+                        st.subheader(f"Country Distribution per Cluster ({selected_model_profile})")
+                        fig_country, top_countries_data = plot_country_distribution_per_cluster(df_profiling_data, temp_cluster_col, top_n=3)
+                        if fig_country:
+                            st.pyplot(fig_country)
+                        else:
+                            st.caption("Could not generate country distribution plot.")
+                            top_countries_data = {} # Ensure it's initialized if plot fails
+
+
+                        # --- 2. Feature Profiling (Radar Chart & Means Table) ---
+                        st.subheader(f"Feature Profiles ({selected_model_profile})")
                         missing_radar_features = [f for f in KEY_FEATURES_RADAR if f not in df_profiling_data.columns]
                         if missing_radar_features:
                             st.warning(f"Following features specified for radar chart not found in original data: {missing_radar_features}")
@@ -401,37 +564,55 @@ elif page == "Cluster Profiling":
 
                         if not available_radar_features:
                              st.error("None of the specified key features for radar chart were found in the data.")
+                             cluster_means = pd.DataFrame() # Ensure empty df if no features
                         else:
-                             st.subheader(f"Cluster Profiles for: {selected_model_profile}")
-
-                             df_profiling = df_profiling_data.dropna(subset=available_radar_features + [temp_cluster_col])
-
-                             if df_profiling.empty:
-                                 st.warning("No data available for profiling after handling potential missing values in key features or cluster labels.")
+                             # Calculate means, excluding noise (-1) if present
+                             df_means_calc = df_profiling_data[df_profiling_data[temp_cluster_col] != -1]
+                             if not df_means_calc.empty:
+                                 cluster_means = df_means_calc.groupby(temp_cluster_col)[available_radar_features].mean()
                              else:
-                                 df_profiling[temp_cluster_col] = pd.to_numeric(df_profiling[temp_cluster_col], errors='coerce')
-                                 df_profiling = df_profiling.dropna(subset=[temp_cluster_col])
+                                 cluster_means = pd.DataFrame() # Empty if only noise points
 
-                                 cluster_means = df_profiling[df_profiling[temp_cluster_col] != -1].groupby(temp_cluster_col)[available_radar_features].mean()
+                        if cluster_means.empty:
+                            st.warning("No valid non-noise clusters found to calculate feature profiles.")
+                            cluster_means_norm_df = pd.DataFrame() # Ensure empty df
+                        else:
+                             # --- Radar Chart ---
+                             scaler_radar = MinMaxScaler()
+                             cluster_means_norm = scaler_radar.fit_transform(cluster_means)
+                             cluster_means_norm_df = pd.DataFrame(cluster_means_norm, index=cluster_means.index, columns=cluster_means.columns)
 
-                                 if cluster_means.empty:
-                                     st.warning("No valid clusters found (excluding noise) to calculate profiles.")
-                                 else:
-                                     scaler_radar = MinMaxScaler()
-                                     cluster_means_norm = scaler_radar.fit_transform(cluster_means)
-                                     cluster_means_norm_df = pd.DataFrame(cluster_means_norm, index=cluster_means.index, columns=cluster_means.columns)
+                             num_clusters_found = len(cluster_means_norm_df)
+                             plot_radar_chart(cluster_means_norm_df, selected_model_profile, num_clusters_found)
 
-                                     num_clusters_found = len(cluster_means_norm_df)
-                                     plot_radar_chart(cluster_means_norm_df, selected_model_profile, num_clusters_found)
+                             # --- Means Table ---
+                             st.subheader("Mean Values per Cluster (Original Scale)")
+                             st.dataframe(cluster_means.style.format("{:.2f}"))
 
-                                     st.subheader("Mean Values per Cluster (Original Scale)")
-                                     st.dataframe(cluster_means.style.format("{:.2f}"))
+
+                        # --- 3. Cluster Explanations ---
+                        st.subheader(f"Cluster Interpretations ({selected_model_profile})")
+                        if not cluster_means.empty and not cluster_means_norm_df.empty and top_countries_data is not None:
+                             explanations = generate_cluster_explanations(
+                                 cluster_means,
+                                 cluster_means_norm_df,
+                                 top_countries_data, # Pass the data from the country plot
+                                 available_radar_features
+                             )
+                             for cluster_id in sorted(explanations.keys()):
+                                 st.markdown(explanations[cluster_id])
+                                 st.markdown("---") # Separator
+                        else:
+                             st.caption("Cannot generate interpretations - missing profile means, normalized means, or country data.")
+
+                    # --- End Profiling Section ---
+                    elif df_profiling_data is not None and df_profiling_data.empty:
+                         st.warning("Data is empty after attempting to assign and clean cluster labels. Cannot proceed with profiling.")
 
                 else:
                      st.error(f"Labels for {selected_model_profile} could not be loaded (returned None) for profiling.")
             else:
                 st.warning("Please select a valid model.")
-
 
 elif page == "Dataset Explorer":
     st.title("Dataset Explorer")
