@@ -1,6 +1,3 @@
-Here’s an in-depth README draft for your project, tailored to the water quality clustering analysis dashboard you described:
-
----
 
 # Water Quality Clustering Analysis Dashboard
 
