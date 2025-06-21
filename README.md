@@ -88,7 +88,3 @@ Contributions and suggestions are welcome! Please open issues or submit pull req
 ## License
 
 This project is licensed under the MIT License.
-
----
-
-Let me know if you want this README further tailored or if you need sections on setup, requirements, or code structure!
